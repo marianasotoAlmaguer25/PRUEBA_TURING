@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Juez</title>
+<link rel="stylesheet" href="/static/estilo.css?v=4">
+</head>
+<body>
+<div class="pagina">
+
+<section id="inicio" class="vista">
+  <header class="encabezado">
+    <div class="icono"><svg viewBox="0 0 24 24"><path d="M12 3v18M7 21h10M5 7h14M5 7l-3 7a3 3 0 0 0 6 0L5 7zM19 7l-3 7a3 3 0 0 0 6 0l-3-7z"/></svg></div>
+    <div><h1>Eres el juez</h1><p>Haz preguntas a los dos participantes. Uno es humano y el otro es una IA: ¿puedes adivinar cuál?</p></div>
+  </header>
+  <div class="tarjeta">
+    <p>Cada pregunta les llega a A y a B al mismo tiempo. Cuando termine el tiempo, o cuando creas saberlo, indica cuál es la máquina.</p>
+    <button id="btnIniciar" class="primario" disabled>Comenzar ronda</button>
+    <p id="conexion" class="nota">Conectando con el servidor...</p>
+  </div>
+</section>
+
+<section id="chat" class="vista" hidden>
+  <header class="encabezado">
+    <div class="icono"><svg viewBox="0 0 24 24"><path d="M12 3v18M7 21h10M5 7h14M5 7l-3 7a3 3 0 0 0 6 0L5 7zM19 7l-3 7a3 3 0 0 0 6 0l-3-7z"/></svg></div>
+    <div><h1>Eres el juez</h1><p>Haz preguntas a los dos participantes. Uno es humano y el otro es una IA: ¿puedes adivinar cuál?</p></div>
+    <span id="reloj" class="temporizador">0:00</span>
+  </header>
+  <div class="canales">
+    <div class="canal tarjeta" data-canal="A">
+      <header class="cabecera">
+        <div class="avatar a" aria-hidden="true">A</div>
+        <div><strong>Participante A</strong><span class="estado">En línea</span></div>
+      </header>
+      <div class="mensajes" aria-live="polite"></div>
+    </div>
+    <div class="canal tarjeta" data-canal="B">
+      <header class="cabecera">
+        <div class="avatar b" aria-hidden="true">B</div>
+        <div><strong>Participante B</strong><span class="estado">En línea</span></div>
+      </header>
+      <div class="mensajes" aria-live="polite"></div>
+    </div>
+  </div>
+  <form id="form" class="entrada tarjeta">
+    <input id="texto" autocomplete="off" maxlength="500" placeholder="Escribe tu pregunta para A y B..." aria-label="Pregunta">
+    <button class="primario">Enviar</button>
+  </form>
+  <div class="veredicto tarjeta">
+    <p id="pista" class="nota"></p>
+    <button data-voto="A" disabled>A es la máquina</button>
+    <button data-voto="B" disabled>B es la máquina</button>
+  </div>
+</section>
+
+<section id="resultado" class="vista" hidden>
+  <div class="tarjeta">
+    <p id="sello" class="sello"></p>
+    <h2 id="verdad"></h2>
+    <p id="global" class="puntos"></p>
+    <button class="primario" onclick="location.reload()">Nueva ronda</button>
+  </div>
+</section>
+
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const MIN_PREGUNTAS = 2;          // preguntas mínimas antes de poder votar antes de tiempo
+let ws, preguntas = 0, enChat = false, abierta = false, fin = 0, tic;
+
+const canal = c => document.querySelector(`.canal[data-canal="${c}"]`);
+const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+function ver(id) { for (const p of ["inicio", "chat", "resultado"]) $("#" + p).hidden = p !== id; }
+
+function burbuja(c, clase, texto) {
+  const lista = canal(c).querySelector(".mensajes");
+  const d = document.createElement("div");
+  d.className = clase;
+  d.textContent = texto;
+  lista.appendChild(d);
+  lista.scrollTop = 1e9;
+}
+function estadoCanal(c, txt) {
+  const e = canal(c).querySelector(".estado");
+  e.textContent = txt;
+  e.classList.toggle("escribiendo", txt.startsWith("Escrib"));
+}
+
+function actualizarVoto() {
+  const faltan = MIN_PREGUNTAS - preguntas;
+  const puede = !abierta || faltan <= 0;
+  document.querySelectorAll("[data-voto]").forEach(b => b.disabled = !puede);
+  $("#pista").textContent = !abierta ? "Se acabó el tiempo. Emite tu veredicto."
+    : faltan > 0 ? `Haz ${faltan} pregunta${faltan > 1 ? "s" : ""} más para poder votar.`
+    : "Puedes votar ahora o seguir preguntando hasta que termine el tiempo.";
+}
+function pintarReloj() {
+  const resto = Math.max(0, Math.ceil((fin - Date.now()) / 1000));
+  $("#reloj").textContent = fmt(resto);
+  $("#reloj").classList.toggle("urgente", resto <= 30);
+  if (resto === 0) clearInterval(tic);
+}
+
+function conectar() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/juez");
+  ws.onclose = () => {
+    $("#btnIniciar").disabled = true;
+    if (enChat && !$("#chat").hidden) { burbuja("A", "aviso", "Se perdió la conexión. Recarga la página."); $("#texto").disabled = true; }
+    else if (!enChat) $("#conexion").textContent = "Sin conexión con el servidor. Recarga la página.";
+  };
+  ws.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (d.type === "estado" && !enChat) {
+      $("#btnIniciar").disabled = !d.humano_disponible;
+      $("#conexion").textContent = d.humano_disponible
+        ? `Hay una persona conectada. La ronda dura ${fmt(d.duracion)}.`
+        : "Esperando a que una persona abra la página de respuesta (/humano).";
+    }
+    else if (d.type === "started") {
+      enChat = true; abierta = true; fin = Date.now() + d.duracion * 1000;
+      ver("chat"); pintarReloj(); tic = setInterval(pintarReloj, 250);
+      $("#texto").focus(); actualizarVoto();
+    }
+    else if (d.type === "msg") { estadoCanal(d.canal, "En línea"); burbuja(d.canal, "burbuja par", d.text); }
+    else if (d.type === "time_up") {
+      abierta = false; clearInterval(tic); $("#reloj").textContent = "0:00";
+      $("#texto").disabled = true; estadoCanal("A", "En línea"); estadoCanal("B", "En línea");
+      for (const c of ["A", "B"]) burbuja(c, "aviso", "Se acabó el tiempo");
+      actualizarVoto();
+    }
+    else if (d.type === "aborted") {
+      clearInterval(tic);
+      $("#sello").textContent = "Ronda cancelada"; $("#sello").className = "sello mal";
+      $("#verdad").textContent = "Hubo un problema técnico con uno de los participantes. Esta ronda no cuenta.";
+      $("#global").textContent = ""; ver("resultado");
+    }
+    else if (d.type === "error") $("#conexion").textContent = d.text;
+    else if (d.type === "result") mostrarResultado(d);
+  };
+}
+
+function mostrarResultado(d) {
+  clearInterval(tic);
+  const s = d.stats, pct = s.total ? Math.round(100 * s.aciertos / s.total) : 0;
+  const otro = d.ia === "A" ? "B" : "A";
+  $("#sello").textContent = d.correct ? "Acertaste" : "Te equivocaste";
+  $("#sello").className = "sello " + (d.correct ? "ok" : "mal");
+  $("#verdad").textContent = `${d.ia} era la inteligencia artificial y ${otro} era la persona`;
+  $("#global").innerHTML = "";
+  for (const t of [
+    `La IA fue identificada en ${s.aciertos} de ${s.total} rondas (${pct}%).`,
+    `Engañó al juez en ${s.total - s.aciertos} de ${s.total} rondas.`,
+    "Si el porcentaje de aciertos se acerca al 50%, la máquina es difícil de distinguir de una persona.",
+  ]) { const p = document.createElement("span"); p.textContent = t; $("#global").appendChild(p); }
+  ver("resultado");
+}
+
+$("#btnIniciar").onclick = () => ws.send(JSON.stringify({ type: "start" }));
+$("#form").onsubmit = e => {
+  e.preventDefault();
+  const t = $("#texto").value.trim();
+  if (!t || !abierta) return;
+  ws.send(JSON.stringify({ type: "msg", text: t }));
+  burbuja("A", "burbuja yo", t); burbuja("B", "burbuja yo", t);
+  $("#texto").value = "";
+  preguntas++; actualizarVoto();
+};
+document.querySelectorAll("[data-voto]").forEach(b =>
+  b.onclick = () => ws.send(JSON.stringify({ type: "guess", guess: b.dataset.voto })));
+
+conectar();
+</script>
+</body>
+</html>

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Participante</title>
+<link rel="stylesheet" href="/static/estilo.css?v=4">
+</head>
+<body>
+<div class="pagina">
+
+<section id="espera" class="vista">
+  <header class="encabezado">
+    <div class="icono"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.5 7.2L3 21l1.8-5.5A8 8 0 1 1 21 12z"/></svg></div>
+    <div><h1>Estás en la sala</h1><p>Deja esta pantalla abierta. Cuando el servidor te asigne una ronda, aparecerá el chat.</p></div>
+  </header>
+  <div class="tarjeta">
+    <p>El juez hablará al mismo tiempo contigo y con una IA, y tratará de adivinar cuál es la máquina.</p>
+    <p id="conexion" class="nota">Conectando con el servidor...</p>
+  </div>
+</section>
+
+<section id="chat" class="vista" hidden>
+  <header class="encabezado">
+    <div class="icono"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.5 7.2L3 21l1.8-5.5A8 8 0 1 1 21 12z"/></svg></div>
+    <div><h1>Responde al juez</h1><p>Contesta con naturalidad. El juez intenta descubrir quién es la IA.</p></div>
+  </header>
+  <details class="ficha tarjeta" open>
+    <summary>Tu personaje en esta ronda</summary>
+    <ul>
+      <li>Te llamas Dani, tienes 22 años y estudias diseño gráfico.</li>
+      <li>Tienes un gato que se llama Pancho.</li>
+      <li>Te gustan los tacos al pastor, el café con leche y el helado de limón o de pistache. El de menta no.</li>
+      <li>Escuchas indie y reguetón, ves comedias y juegas videojuegos de noche.</li>
+      <li>No digas tu nombre real ni hables de la clase, la escuela o gente que conoces. Si te preguntan algo que no está aquí, invéntalo corto.</li>
+    </ul>
+  </details>
+  <div class="chat-unico tarjeta">
+    <header class="cabecera">
+      <div class="avatar juez" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v18M7 21h10M5 7h14M5 7l-3 7a3 3 0 0 0 6 0L5 7zM19 7l-3 7a3 3 0 0 0 6 0l-3-7z"/></svg></div>
+      <div><strong>Juez</strong><span id="estadoPar" class="estado">Conectado</span></div>
+    </header>
+    <div id="mensajes" class="mensajes" aria-live="polite"></div>
+    <form id="form" class="entrada">
+      <input id="texto" autocomplete="off" maxlength="500" placeholder="Escribe tu respuesta..." aria-label="Mensaje">
+      <button class="primario">Enviar</button>
+    </form>
+  </div>
+</section>
+
+</div>
+<script>
+const $ = s => document.querySelector(s);
+let ws;
+
+function ver(id) { $("#espera").hidden = id !== "espera"; $("#chat").hidden = id !== "chat"; }
+function burbuja(clase, texto) {
+  const d = document.createElement("div");
+  d.className = clase;
+  d.textContent = texto;
+  $("#mensajes").appendChild(d);
+  $("#mensajes").scrollTop = 1e9;
+}
+
+function conectar() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/humano");
+  ws.onopen = () => { $("#conexion").textContent = "Conectado. Esperando asignación."; };
+  ws.onclose = () => {
+    $("#texto").disabled = true;
+    $("#conexion").textContent = "Sin conexión con el servidor. Recarga la página.";
+    if (!$("#chat").hidden) burbuja("aviso", "Se perdió la conexión. Recarga la página.");
+  };
+  ws.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (d.type === "waiting") {
+      $("#mensajes").innerHTML = ""; document.title = "Participante"; ver("espera");
+    } else if (d.type === "assigned") {
+      $("#mensajes").innerHTML = ""; $("#texto").disabled = false;
+      document.title = "Nueva ronda"; ver("chat"); $("#texto").focus();
+    } else if (d.type === "msg") burbuja("burbuja par", d.text);
+    else if (d.type === "time_up") {
+      $("#texto").disabled = true;
+      burbuja("aviso", "Se acabó el tiempo. El juez está dando su veredicto.");
+    }
+  };
+}
+
+$("#form").onsubmit = e => {
+  e.preventDefault();
+  const t = $("#texto").value.trim();
+  if (!t) return;
+  ws.send(JSON.stringify({ type: "msg", text: t }));
+  burbuja("burbuja yo", t);
+  $("#texto").value = "";
+};
+
+conectar();
+</script>
+</body>
+</html>
