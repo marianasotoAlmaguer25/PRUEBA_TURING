@@ -1,11 +1,11 @@
 """Prueba de Turing de tres participantes. Funciona 100% en red local, sin internet.
 
 El interrogador (el profe) chatea a la vez con dos canales, A y B. Uno lo atiende
-una persona conectada en /humano y el otro la IA (Ollama + llama3). El servidor
+una persona conectada en /humano y el otro la IA (API en la nube u Ollama). El servidor
 sortea en secreto cuál canal es cuál. Al terminar el tiempo, el interrogador
 dice cuál es la máquina.
 
-Requisitos: Python 3.9+, aiohttp (pip install aiohttp) y Ollama con el modelo llama3.
+Requisitos: Python 3.9+, aiohttp (pip install aiohttp).
 Ejecutar:  python server.py
 """
 import asyncio
@@ -16,6 +16,7 @@ import random
 import re
 import socket
 import time
+import uuid
 from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
@@ -37,11 +38,12 @@ def cargar_env():
 
 cargar_env()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")
-# Si defines API_KEY se usa una API en la nube (formato OpenAI, p. ej. DeepSeek) en vez de Ollama local.
+# Si defines API_KEY se usa una API en la nube (formato OpenAI, p. ej. OpenCode Go) en vez de Ollama local.
 # La clave se pasa solo por variable de entorno: nunca la escribas en el código ni la subas a GitHub.
-API_KEY = os.getenv("API_KEY", "")
-API_URL = os.getenv("API_URL", "https://api.deepseek.com/chat/completions")
-MODELO = os.getenv("MODELO", "deepseek-flash" if API_KEY else "llama3")
+API_KEY = os.getenv("API_KEY", "").strip()
+API_URL = os.getenv("API_URL", "https://opencode.ai/inference/go/openai/v1/chat/completions").strip()
+# Nombre del modelo: en OpenCode Go es deepseek-v4.1-flash; si no hay API_KEY, usa llama3 en Ollama.
+MODELO = os.getenv("MODELO", "deepseek-v4.1-flash" if API_KEY else "llama3").strip()
 PUERTO = int(os.getenv("PUERTO", "8080"))
 DURACION = int(os.getenv("DURACION", "300"))  # segundos por ronda (Turing proponía 5 minutos)
 
@@ -64,11 +66,13 @@ def ejemplos_al_azar(n=5):
     for q, r in random.sample(PARES, min(n, len(PARES))):
         msgs += [{"role": "user", "content": q}, {"role": "assistant", "content": r}]
     return msgs
+
+
 RESULTADOS = BASE / "resultados.jsonl"
 
 humanos = set()   # personas conectadas en /humano
 jueces = set()    # interrogadores conectados (para avisarles si hay persona disponible)
-http = None       # ClientSession hacia Ollama
+http = None       # ClientSession hacia API / Ollama
 STATS = {"total": 0, "aciertos": 0}   # aciertos = el interrogador identificó a la IA
 
 
@@ -133,22 +137,37 @@ def repetida(texto, previas):
     return any(difflib.SequenceMatcher(None, t, norm(p)).ratio() > 0.85 for p in previas)
 
 
+SESION_API = "ses_" + uuid.uuid4().hex   # id de sesión estable para OpenCode (enruta y reutiliza caché)
+OPCIONALES = True                        # parámetros que algunos proveedores rechazan; se quitan si dan error 400
+
+
 async def preguntar_api(mensajes, temp, extra):
-    """API en la nube compatible con OpenAI (DeepSeek por defecto)."""
-    payload = {
-        "model": MODELO,
-        "messages": [{"role": "system", "content": SISTEMA}] + ejemplos_al_azar() + mensajes
-                    + [{"role": "system", "content": RECORDATORIO}] + (extra or []),
-        "temperature": temp, "top_p": 0.9, "max_tokens": 120,
-        "presence_penalty": 0.4, "frequency_penalty": 0.3, "stream": False,
-    }
-    if os.getenv("PENSAR") != "1":                 # sin modo de razonamiento: más rápido y responde directo
-        payload["thinking"] = {"type": "disabled"}
-    async with http.post(API_URL, json=payload, headers={"Authorization": f"Bearer {API_KEY}"}) as r:
-        data = await r.json()
-    if "choices" not in data:
+    """API en la nube compatible con OpenAI (OpenCode Go)."""
+    global OPCIONALES
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    if "opencode.ai" in API_URL:
+        headers["x-opencode-session"] = SESION_API
+    for intento in range(2):
+        payload = {
+            "model": MODELO,
+            "messages": [{"role": "system", "content": SISTEMA}] + ejemplos_al_azar() + mensajes
+                        + [{"role": "system", "content": RECORDATORIO}] + (extra or []),
+            "temperature": temp, "top_p": 0.9, "max_tokens": 300, "stream": False,
+        }
+        if OPCIONALES:
+            payload["presence_penalty"] = 0.4
+            payload["frequency_penalty"] = 0.3
+            if os.getenv("PENSAR") != "1":             # sin modo de razonamiento: responde directo
+                payload["thinking"] = {"type": "disabled"}
+        async with http.post(API_URL, json=payload, headers=headers) as r:
+            estado_http = r.status
+            data = await r.json(content_type=None)
+        if "choices" in data:
+            return data["choices"][0]["message"].get("content") or ""
+        if intento == 0 and OPCIONALES and estado_http == 400:
+            OPCIONALES = False                          # el proveedor no acepta esos parámetros: reintenta sin ellos
+            continue
         raise RuntimeError(data)
-    return data["choices"][0]["message"].get("content") or ""
 
 
 async def preguntar(mensajes, temp=0.8, extra=None):
@@ -272,7 +291,7 @@ async def generar(ses):
             texto = limpiar(crudo)
             print("[IA]", repr(crudo), "->", repr(texto))
         except Exception as e:
-            print("Error al hablar con Ollama:", e)
+            print("Error al hablar con el modelo:", e)
             texto = ""
         if texto and not ASISTENTE.search(texto) and not repetida(texto, previas):
             return texto
